@@ -516,17 +516,35 @@ async function historyClean() {
 
     for (const project of selectedProjects) {
       const originalHistory = project.config.history || [];
-      const keepCount = Math.min(25, originalHistory.length);
 
-      // 保留最近25条记录（数组开头的记录是最新的）
-      // 根据测试，history 数组中越靠前的记录越新
-      const cleanedHistory = originalHistory.slice(0, keepCount);
+      // 去重：保留最新的不重复的25条记录
+      const seenDisplays = new Set();
+      const uniqueHistory = [];
+
+      for (const item of originalHistory) {
+        const display = item.display?.trim();
+
+        // 过滤无效记录
+        if (!display || display.length < 2) continue;
+
+        // 去重：只保留第一次出现的（最新的）
+        if (!seenDisplays.has(display) && uniqueHistory.length < 25) {
+          seenDisplays.add(display);
+          uniqueHistory.push(item);
+        }
+
+        if (uniqueHistory.length >= 25) break;
+      }
+
+      const cleanedHistory = uniqueHistory;
       const cleanedCount = originalHistory.length - cleanedHistory.length;
+      const duplicateCount = originalHistory.length - uniqueHistory.length - (originalHistory.length > 25 ? originalHistory.length - 25 : 0);
 
       if (cleanedCount > 0) {
         updateProjectHistory(project.realPath, cleanedHistory);
         totalCleaned += cleanedCount;
-        console.log(`✓ ${project.name}: ${chalk.red(originalHistory.length)} → ${chalk.green(cleanedHistory.length)} 条 (清理 ${cleanedCount} 条)`);
+        const duplicateInfo = duplicateCount > 0 ? `, 去重 ${duplicateCount} 条` : '';
+        console.log(`✓ ${project.name}: ${chalk.red(originalHistory.length)} → ${chalk.green(cleanedHistory.length)} 条 (清理 ${cleanedCount} 条${duplicateInfo})`);
       }
     }
 
