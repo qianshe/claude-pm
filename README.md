@@ -24,8 +24,8 @@ npm install -g @qianshe/claude-pm
 ### 本地开发安装
 
 ```bash
-git clone <仓库地址>
-cd ClaudePM
+git clone git@github.com:qianshe/claude-pm.git
+cd claude-pm
 npm install
 npm link  # 全局安装命令
 ```
@@ -104,7 +104,7 @@ claude-pm sessions --size 5
 ## 项目结构
 
 ```
-ClaudePM/
+claude-pm/
 ├── bin/
 │   └── claude-pm.js        # CLI 入口文件
 ├── src/
@@ -113,6 +113,7 @@ ClaudePM/
 │   └── commands.js         # 命令实现
 ├── package.json
 ├── .gitignore
+├── LICENSE
 └── README.md
 ```
 
@@ -145,6 +146,10 @@ ClaudePM/
 
 - Claude 官方未提供项目导出功能
 - `.claude.json` 文件会持续累积历史记录，可能导致性能问题
+
+## 仓库地址
+
+GitHub: [https://github.com/qianshe/claude-pm](https://github.com/qianshe/claude-pm)
 
 ## 许可证
 
