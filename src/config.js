@@ -2,9 +2,10 @@ const Conf = require('conf');
 const path = require('path');
 const os = require('os');
 
-// 配置存储
+// 配置存储 - 统一存储到 ~/.claude/claude-pm/
 const config = new Conf({
   projectName: 'claude-pm',
+  cwd: path.join(os.homedir(), '.claude', 'claude-pm'),
   defaults: {
     // Claude配置路径（待用户提供）
     claudeConfigPath: '',

@@ -45,8 +45,7 @@ npm link  # 全局安装命令
 ### 自定义路径
 
 如需使用自定义路径，可在首次运行时配置，配置信息将存储在：
-- Windows: `%APPDATA%\claude-pm`
-- macOS/Linux: `~/.config/claude-pm`
+- 所有平台: `~/.claude/claude-pm/` (与 `~/.claude/projects/` 同级)
 
 ## 使用方法
 

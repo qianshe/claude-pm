@@ -83,6 +83,77 @@ function getRealPathFromJsonl(projectDir) {
 }
 
 /**
+ * 获取项目会话信息（包括时间戳）
+ * @param {string} projectDir - 项目目录路径
+ * @returns {Array} 会话信息列表
+ */
+function getProjectSessions(projectDir) {
+  try {
+    const files = fs.readdirSync(projectDir);
+    const jsonlFiles = files.filter(f => f.endsWith('.jsonl'));
+
+    const sessions = [];
+
+    for (const file of jsonlFiles) {
+      const filePath = path.join(projectDir, file);
+      const stats = fs.statSync(filePath);
+
+      let lastTimestamp = null;
+      let hasContent = false;
+
+      try {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const lines = content.split('\n').filter(line => line.trim());
+
+        for (const line of lines) {
+          try {
+            const json = JSON.parse(line);
+
+            // 获取最后时间戳
+            if (json.timestamp) {
+              const timestamp = new Date(json.timestamp);
+              if (!lastTimestamp || timestamp > lastTimestamp) {
+                lastTimestamp = timestamp;
+              }
+            }
+
+            // 检查是否有实际对话内容（非快照更新）
+            if (json.type !== 'file-history-snapshot' || !json.isSnapshotUpdate) {
+              hasContent = true;
+            }
+
+            // 检查是否有消息内容
+            if (json.display && json.display.trim()) {
+              hasContent = true;
+            }
+          } catch (e) {
+            // 跳过无效的 JSON 行
+          }
+        }
+      } catch (error) {
+        // 忽略文件读取错误
+      }
+
+      const sessionId = file.replace('.jsonl', '');
+      sessions.push({
+        sessionId,
+        fileName: file,
+        filePath,
+        lastModified: stats.mtime,
+        lastTimestamp: lastTimestamp || stats.mtime,
+        hasContent,
+        size: stats.size,
+      });
+    }
+
+    // 按最后时间戳排序
+    return sessions.sort((a, b) => b.lastTimestamp - a.lastTimestamp);
+  } catch (error) {
+    return [];
+  }
+}
+
+/**
  * 将真实路径转换为目录名格式
  * 例如: D:\myProject\top.qianshe\ClaudePM -> D--myProject-top-qianshe-ClaudePM
  * @param {string} realPath - 真实路径
@@ -174,7 +245,7 @@ function getLocalProjects() {
         size: size,
         sessionCount: sessionCount,
         lastSessionId: config.lastSessionId,
-        hasCache: hasCacheDir,
+        hasCache: hasCacheDir && (size > 0 || sessionCount > 0),
         // 从配置中获取统计信息
         lastDuration: config.lastDuration,
         lastCost: config.lastCost,
@@ -193,6 +264,9 @@ function getLocalProjects() {
       if (!projectMap.has(realPath)) {
         const stats = fs.statSync(projectDir);
 
+        const size = getDirectorySize(projectDir);
+        const sessionCount = getSessionCount(projectDir);
+
         projectMap.set(realPath, {
           dirName: dirName,
           name: path.basename(realPath),
@@ -200,10 +274,10 @@ function getLocalProjects() {
           path: projectDir,
           realPath: realPath,
           lastModified: stats.mtime,
-          size: getDirectorySize(projectDir),
-          sessionCount: getSessionCount(projectDir),
+          size: size,
+          sessionCount: sessionCount,
           lastSessionId: null,
-          hasCache: true,
+          hasCache: size > 0 || sessionCount > 0,
         });
       }
     }
@@ -324,9 +398,73 @@ function getMostRecentProject() {
   }
 }
 
+/**
+ * 清理项目历史记录
+ * @param {Object} claudeProjects - .claude.json 中的项目配置
+ * @param {string} projectPath - 项目路径
+ * @param {Array} sessions - 会话信息列表
+ * @returns {Array} 过滤后的历史记录
+ */
+function cleanProjectHistory(claudeProjects, projectPath, sessions) {
+  const projectConfig = claudeProjects[projectPath];
+  if (!projectConfig || !projectConfig.history) {
+    return [];
+  }
+
+  const history = projectConfig.history;
+  const validSessions = new Set(sessions.map(s => s.sessionId));
+
+  // 过滤历史记录
+  const cleanedHistory = history.filter((item) => {
+    // 1. 如果会话文件不存在，删除
+    if (item.lastSessionId && !validSessions.has(item.lastSessionId)) {
+      return false;
+    }
+
+    // 2. 删除空内容或无效记录
+    if (!item.display || !item.display.trim()) {
+      return false;
+    }
+
+    // 3. 删除重复内容（简单判断）
+    if (item.display.length < 3 || /^(继续|好的|嗯|知道了)/.test(item.display.trim())) {
+      return false;
+    }
+
+    // 4. 保留最近的有效记录
+    return true;
+  });
+
+  return cleanedHistory;
+}
+
+/**
+ * 更新 .claude.json 中的历史记录
+ * @param {string} projectPath - 项目路径
+ * @param {Array} cleanedHistory - 清理后的历史记录
+ */
+function updateProjectHistory(projectPath, cleanedHistory) {
+  try {
+    const configPath = require('./config').getClaudeConfigPath();
+    const content = fs.readFileSync(configPath, 'utf-8');
+    const config = JSON.parse(content);
+
+    if (config.projects && config.projects[projectPath]) {
+      config.projects[projectPath].history = cleanedHistory;
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+    }
+  } catch (error) {
+    console.warn(`更新项目历史记录失败: ${error.message}`);
+  }
+}
+
 module.exports = {
   getLocalProjects,
   getProjectInfo,
   formatSize,
   getMostRecentProject,
+  getProjectSessions,
+  cleanProjectHistory,
+  updateProjectHistory,
+  getClaudeProjects,
 };

@@ -1,6 +1,6 @@
 const chalk = require('chalk');
 const ora = require('ora');
-const { getLocalProjects, getProjectInfo, formatSize, getMostRecentProject } = require('./projectManager');
+const { getLocalProjects, getProjectInfo, formatSize, getMostRecentProject, updateProjectHistory, getClaudeProjects } = require('./projectManager');
 const { getCurrentProject, setCurrentProject } = require('./config');
 
 /**
@@ -208,10 +208,35 @@ async function cleanProjects(options = {}) {
 
     // 删除无缓存的项目
     const deletedPaths = [];
+    const deletedDirs = [];
+
     noCacheProjects.forEach(project => {
       if (config.projects && config.projects[project.realPath]) {
         delete config.projects[project.realPath];
         deletedPaths.push(project.realPath);
+
+        // 尝试删除对应的缓存目录
+        try {
+          const fs = require('fs');
+          if (fs.existsSync(project.path)) {
+            const files = fs.readdirSync(project.path);
+            if (files.length === 0) {
+              // 空目录，直接删除
+              fs.rmdirSync(project.path);
+              deletedDirs.push(project.path);
+            } else {
+              // 非空目录，只删除 .jsonl 文件
+              const jsonlFiles = files.filter(f => f.endsWith('.jsonl'));
+              jsonlFiles.forEach(file => {
+                const filePath = require('path').join(project.path, file);
+                fs.unlinkSync(filePath);
+              });
+              deletedDirs.push(`${project.path} (已清理 .jsonl 文件)`);
+            }
+          }
+        } catch (error) {
+          console.log(chalk.yellow(`警告: 无法清理缓存目录 ${project.path}: ${error.message}`));
+        }
       }
     });
 
@@ -235,9 +260,17 @@ async function cleanProjects(options = {}) {
 
     console.log(chalk.green(`\n✅ 已清理 ${deletedPaths.length} 个项目\n`));
 
+    console.log(chalk.yellow('📋 已从配置中删除的项目:'));
     deletedPaths.forEach(path => {
       console.log(chalk.gray(`  - ${path}`));
     });
+
+    if (deletedDirs.length > 0) {
+      console.log(chalk.yellow('\n🗂️  已清理的缓存目录:'));
+      deletedDirs.forEach(dir => {
+        console.log(chalk.gray(`  - ${dir}`));
+      });
+    }
 
     console.log();
   } catch (error) {
@@ -395,10 +428,123 @@ async function manageSessionsCommand(projectName, options = {}) {
   }
 }
 
+/**
+ * 清理项目历史记录（基于 history 大小）
+ */
+async function historyClean() {
+  const spinner = ora('正在扫描项目历史记录...').start();
+
+  try {
+    const claudeProjects = getClaudeProjects();
+    const largeHistoryProjects = [];
+
+    // 筛选 history 大于 30 的项目
+    for (const [projectPath, config] of Object.entries(claudeProjects)) {
+      if (config.history && config.history.length > 30) {
+        const projectInfo = getProjectInfo(projectPath) || {
+          name: projectPath.split(/[/\\]/).pop() || 'Unknown',
+          realPath: projectPath
+        };
+
+        largeHistoryProjects.push({
+          ...projectInfo,
+          historySize: config.history.length,
+          config: config
+        });
+      }
+    }
+
+    spinner.stop();
+
+    if (largeHistoryProjects.length === 0) {
+      console.log(chalk.green('\n✅ 所有项目的历史记录都在合理范围内（≤30条）\n'));
+      return;
+    }
+
+    console.log(chalk.bold.yellow(`\n📋 发现 ${largeHistoryProjects.length} 个项目历史记录过多 (>30条):\n`));
+
+    // 显示筛选出的项目
+    largeHistoryProjects.forEach((project, index) => {
+      console.log(`  ${index + 1}. ${chalk.cyan(project.name)} - ${chalk.red(project.historySize)} 条历史记录`);
+      console.log(`     ${chalk.gray('路径:')} ${project.realPath}`);
+      console.log();
+    });
+
+    // 准备选择项
+    const inquirer = require('inquirer');
+    const choices = largeHistoryProjects.map((project, index) => ({
+      name: `${chalk.gray(`${index + 1}.`)} ${chalk.cyan(project.name)} - ${chalk.red(project.historySize)} 条历史记录 - ${chalk.gray(project.realPath)}`,
+      value: project,
+      checked: true, // 默认选中所有项目
+    }));
+
+    // 交互式选择
+    const { selectedProjects } = await inquirer.prompt([
+      {
+        type: 'checkbox',
+        name: 'selectedProjects',
+        message: '选择要清理历史记录的项目 (将只保留最近25条):',
+        choices: choices,
+        pageSize: 15,
+      }
+    ]);
+
+    if (selectedProjects.length === 0) {
+      console.log(chalk.yellow('\n❌ 未选择任何项目\n'));
+      return;
+    }
+
+    // 确认清理
+    const totalHistorySize = selectedProjects.reduce((sum, project) => sum + project.historySize, 0);
+    const { confirmClean } = await inquirer.prompt([
+      {
+        type: 'confirm',
+        name: 'confirmClean',
+        message: `确认要清理 ${selectedProjects.length} 个项目的历史记录吗？（共 ${totalHistorySize} 条，将保留最近25条/项目）`,
+        default: false,
+      }
+    ]);
+
+    if (!confirmClean) {
+      console.log(chalk.yellow('\n❌ 已取消清理\n'));
+      return;
+    }
+
+    // 执行清理
+    const finalSpinner = ora('正在清理历史记录...').start();
+    let totalCleaned = 0;
+
+    for (const project of selectedProjects) {
+      const originalHistory = project.config.history || [];
+      const keepCount = Math.min(25, originalHistory.length);
+
+      // 保留最近25条记录（数组开头的记录是最新的）
+      // 根据测试，history 数组中越靠前的记录越新
+      const cleanedHistory = originalHistory.slice(0, keepCount);
+      const cleanedCount = originalHistory.length - cleanedHistory.length;
+
+      if (cleanedCount > 0) {
+        updateProjectHistory(project.realPath, cleanedHistory);
+        totalCleaned += cleanedCount;
+        console.log(`✓ ${project.name}: ${chalk.red(originalHistory.length)} → ${chalk.green(cleanedHistory.length)} 条 (清理 ${cleanedCount} 条)`);
+      }
+    }
+
+    finalSpinner.succeed(chalk.green('历史记录清理完成'));
+    console.log(`\n🎉 总共清理了 ${totalCleaned} 条历史记录\n`);
+
+  } catch (error) {
+    spinner.fail(chalk.red('清理历史记录失败'));
+    console.error(chalk.red(`错误: ${error.message}\n`));
+    process.exit(1);
+  }
+}
+
 module.exports = {
   listProjects,
   switchProject,
   showCurrentProject,
   cleanProjects,
   manageSessionsCommand,
+  historyClean,
 };
