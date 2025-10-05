@@ -1,6 +1,6 @@
 {
   "name": "@qianshe/claude-pm",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Claude Projects Local Manager - 本地项目管理工具",
   "main": "src/index.js",
   "bin": {
