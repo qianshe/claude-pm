@@ -467,4 +467,7 @@ module.exports = {
   cleanProjectHistory,
   updateProjectHistory,
   getClaudeProjects,
+  getRealPathFromJsonl,
+  convertDirNameToPath,
+  convertPathToDirName,
 };

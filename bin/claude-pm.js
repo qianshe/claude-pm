@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 const { program } = require('commander');
-const { listProjects, switchProject, showCurrentProject, cleanProjects, manageSessionsCommand, historyClean } = require('../src/commands');
+const { listProjects, switchProject, showCurrentProject, cleanProjects, manageSessionsCommand, manageSingleProjectSessions, historyClean } = require('../src/commands');
 const { version } = require('../package.json');
 
 program
@@ -35,10 +35,16 @@ program
   .action((options) => cleanProjects(options));
 
 program
-  .command('sessions [projectName]')
-  .description('管理项目会话（查看和删除）')
+  .command('sessions')
+  .description('多选项目，查看可清理的会话')
+  .option('--size <kb>', '显示小于指定大小的会话（单位：KB）', '10')
+  .action((options) => manageSessionsCommand(options));
+
+program
+  .command('session <projectName>')
+  .description('管理单个项目的会话（交互式删除）')
   .option('--size <kb>', '自动选中小于指定大小的会话（单位：KB）', '2')
-  .action((projectName, options) => manageSessionsCommand(projectName, options));
+  .action((projectName, options) => manageSingleProjectSessions(projectName, options));
 
 program
   .command('clean-history')

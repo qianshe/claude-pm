@@ -34,7 +34,7 @@ out/
 *.swo
 *~
 .DS_Store
-
+.serena/
 # Environment variables
 .env
 .env.local

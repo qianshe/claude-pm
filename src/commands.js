@@ -1,6 +1,6 @@
 const chalk = require('chalk');
 const ora = require('ora');
-const { getLocalProjects, getProjectInfo, formatSize, getMostRecentProject, updateProjectHistory, getClaudeProjects } = require('./projectManager');
+const { getLocalProjects, getProjectInfo, formatSize, getMostRecentProject, updateProjectHistory, getClaudeProjects, getRealPathFromJsonl } = require('./projectManager');
 const { getCurrentProject, setCurrentProject } = require('./config');
 
 /**
@@ -159,27 +159,124 @@ async function showCurrentProject() {
  * @param {Object} options - 选项
  */
 async function cleanProjects(options = {}) {
-  const spinner = ora('正在扫描无缓存项目...').start();
+  const spinner = ora('正在扫描无效项目...').start();
 
   try {
+    const fs = require('fs');
+    const path = require('path');
+    const { getClaudeConfigPath, getClaudeCachePath } = require('./config');
+
     const projects = getLocalProjects();
-    const noCacheProjects = projects.filter(p => !p.hasCache);
+    const claudeProjects = getClaudeProjects();
+    const cachePath = getClaudeCachePath();
+
+    // 1. 找出配置文件中存在但无缓存的项目
+    const noCacheProjects = projects.filter(p => !p.hasCache && claudeProjects[p.realPath]);
+
+    // 2. 找出缓存目录中存在但配置文件中没有的孤儿目录，以及空目录
+    const orphanDirs = [];
+    const matchedConfigPaths = new Set(); // 记录已被缓存目录匹配的配置路径
+
+    if (fs.existsSync(cachePath)) {
+      const items = fs.readdirSync(cachePath, { withFileTypes: true });
+      const cacheDirs = items.filter(item => item.isDirectory());
+
+      for (const dir of cacheDirs) {
+        const projectDir = path.join(cachePath, dir.name);
+        const files = fs.readdirSync(projectDir);
+        const hasJsonl = files.some(f => f.endsWith('.jsonl'));
+        const isEmpty = files.length === 0;
+
+        const realPath = getRealPathFromJsonl(projectDir);
+
+        // 如果能从 JSONL 中读取到真实路径
+        if (realPath) {
+          matchedConfigPaths.add(realPath);
+
+          // 检查这个路径是否在配置文件中
+          if (!claudeProjects[realPath]) {
+            // 有内容但不在配置中 → 孤儿目录
+            orphanDirs.push({
+              dirName: dir.name,
+              path: projectDir,
+              realPath: realPath,
+              reason: '不在配置文件中'
+            });
+          }
+        } else {
+          // 无法从 JSONL 读取真实路径（空目录或损坏的文件）
+          const { convertDirNameToPath, convertPathToDirName } = require('./projectManager');
+          const convertedPath = convertDirNameToPath(dir.name);
+
+          // 检查转换后的路径是否在配置文件中
+          let matchedConfigPath = null;
+          if (claudeProjects[convertedPath]) {
+            matchedConfigPath = convertedPath;
+          } else {
+            // 尝试反向匹配
+            for (const configPath of Object.keys(claudeProjects)) {
+              if (convertPathToDirName(configPath) === dir.name) {
+                matchedConfigPath = configPath;
+                break;
+              }
+            }
+          }
+
+          if (matchedConfigPath) {
+            matchedConfigPaths.add(matchedConfigPath);
+          }
+
+          // 空目录或无效目录，直接标记为孤儿（无论是否在配置中）
+          if (isEmpty || !hasJsonl) {
+            orphanDirs.push({
+              dirName: dir.name,
+              path: projectDir,
+              realPath: matchedConfigPath || (convertedPath + ' (推测)'),
+              reason: isEmpty ? '空目录' : '无有效会话文件'
+            });
+          } else if (!matchedConfigPath) {
+            // 有文件但无法匹配到配置 → 孤儿目录
+            orphanDirs.push({
+              dirName: dir.name,
+              path: projectDir,
+              realPath: convertedPath + ' (推测)',
+              reason: '无法匹配到配置'
+            });
+          }
+        }
+      }
+    }
 
     spinner.stop();
 
-    if (noCacheProjects.length === 0) {
+    const totalIssues = noCacheProjects.length + orphanDirs.length;
+
+    if (totalIssues === 0) {
       console.log(chalk.green('\n✅ 没有需要清理的项目\n'));
       return;
     }
 
-    console.log(chalk.bold.yellow(`\n🗑️  发现 ${noCacheProjects.length} 个无缓存项目:\n`));
+    console.log(chalk.bold.yellow(`\n🗑️  发现 ${totalIssues} 个需要清理的项目:\n`));
 
-    noCacheProjects.forEach((project, index) => {
-      console.log(`  ${index + 1}. ${chalk.cyan(project.displayName)}`);
-    });
+    if (noCacheProjects.length > 0) {
+      console.log(chalk.bold('【配置文件中存在但无缓存的项目】'));
+      noCacheProjects.forEach((project, index) => {
+        console.log(`  ${index + 1}. ${chalk.cyan(project.displayName)}`);
+      });
+      console.log();
+    }
+
+    if (orphanDirs.length > 0) {
+      console.log(chalk.bold('【需要清理的缓存目录】'));
+      orphanDirs.forEach((dir, index) => {
+        console.log(`  ${index + 1}. ${chalk.cyan(dir.dirName)} ${chalk.yellow(`[${dir.reason}]`)}`);
+        console.log(`     ${chalk.gray('路径:')} ${dir.realPath}`);
+      });
+      console.log();
+    }
 
     if (options.dryRun) {
-      console.log(chalk.yellow('\n[预览模式] 以上项目将被从 .claude.json 中删除'));
+      console.log(chalk.yellow('[预览模式] 以上项目将被清理'));
       console.log(chalk.gray('使用 claude-pm clean 执行实际删除\n'));
       return;
     }
@@ -190,7 +287,7 @@ async function cleanProjects(options = {}) {
       {
         type: 'confirm',
         name: 'confirm',
-        message: `确认要从 .claude.json 中删除这 ${noCacheProjects.length} 个项目吗？`,
+        message: `确认要清理这 ${totalIssues} 个项目吗？`,
         default: false,
       }
     ]);
@@ -201,37 +298,33 @@ async function cleanProjects(options = {}) {
     }
 
     // 读取配置文件
-    const fs = require('fs');
-    const configPath = require('./config').getClaudeConfigPath();
+    const configPath = getClaudeConfigPath();
     const configContent = fs.readFileSync(configPath, 'utf-8');
     const config = JSON.parse(configContent);
 
-    // 删除无缓存的项目
-    const deletedPaths = [];
-    const deletedDirs = [];
+    const deletedConfigPaths = [];
+    const deletedCacheDirs = [];
 
+    // 删除配置文件中无缓存的项目
     noCacheProjects.forEach(project => {
       if (config.projects && config.projects[project.realPath]) {
         delete config.projects[project.realPath];
-        deletedPaths.push(project.realPath);
+        deletedConfigPaths.push(project.realPath);
 
         // 尝试删除对应的缓存目录
         try {
-          const fs = require('fs');
           if (fs.existsSync(project.path)) {
             const files = fs.readdirSync(project.path);
             if (files.length === 0) {
-              // 空目录，直接删除
               fs.rmdirSync(project.path);
-              deletedDirs.push(project.path);
+              deletedCacheDirs.push(project.path);
             } else {
-              // 非空目录，只删除 .jsonl 文件
               const jsonlFiles = files.filter(f => f.endsWith('.jsonl'));
               jsonlFiles.forEach(file => {
-                const filePath = require('path').join(project.path, file);
+                const filePath = path.join(project.path, file);
                 fs.unlinkSync(filePath);
               });
-              deletedDirs.push(`${project.path} (已清理 .jsonl 文件)`);
+              deletedCacheDirs.push(`${project.path} (已清理 .jsonl 文件)`);
             }
           }
         } catch (error) {
@@ -240,12 +333,42 @@ async function cleanProjects(options = {}) {
       }
     });
 
+    // 删除孤儿缓存目录
+    orphanDirs.forEach(dir => {
+      try {
+        // 如果这个孤儿目录对应的配置路径存在，也删除配置
+        if (dir.realPath && claudeProjects[dir.realPath] && !deletedConfigPaths.includes(dir.realPath)) {
+          delete config.projects[dir.realPath];
+          deletedConfigPaths.push(dir.realPath);
+        }
+
+        // 递归删除整个目录
+        const rmDir = (dirPath) => {
+          if (fs.existsSync(dirPath)) {
+            const files = fs.readdirSync(dirPath);
+            files.forEach(file => {
+              const filePath = path.join(dirPath, file);
+              if (fs.statSync(filePath).isDirectory()) {
+                rmDir(filePath);
+              } else {
+                fs.unlinkSync(filePath);
+              }
+            });
+            fs.rmdirSync(dirPath);
+          }
+        };
+
+        rmDir(dir.path);
+        deletedCacheDirs.push(`${dir.path} [${dir.reason}]`);
+      } catch (error) {
+        console.log(chalk.yellow(`警告: 无法删除目录 ${dir.path}: ${error.message}`));
+      }
+    });
+
     // 备份原配置到 ~/.claude/backup 目录
-    const path = require('path');
     const os = require('os');
     const backupDir = path.join(os.homedir(), '.claude', 'backup');
 
-    // 确保备份目录存在
     if (!fs.existsSync(backupDir)) {
       fs.mkdirSync(backupDir, { recursive: true });
     }
@@ -258,21 +381,24 @@ async function cleanProjects(options = {}) {
     // 写入新配置
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
 
-    console.log(chalk.green(`\n✅ 已清理 ${deletedPaths.length} 个项目\n`));
+    console.log(chalk.green(`\n✅ 清理完成\n`));
 
-    console.log(chalk.yellow('📋 已从配置中删除的项目:'));
-    deletedPaths.forEach(path => {
-      console.log(chalk.gray(`  - ${path}`));
-    });
-
-    if (deletedDirs.length > 0) {
-      console.log(chalk.yellow('\n🗂️  已清理的缓存目录:'));
-      deletedDirs.forEach(dir => {
-        console.log(chalk.gray(`  - ${dir}`));
+    if (deletedConfigPaths.length > 0) {
+      console.log(chalk.yellow('📋 已从配置中删除的项目:'));
+      deletedConfigPaths.forEach(p => {
+        console.log(chalk.gray(`  - ${p}`));
       });
+      console.log();
     }
 
-    console.log();
+    if (deletedCacheDirs.length > 0) {
+      console.log(chalk.yellow('🗂️  已清理的缓存目录:'));
+      deletedCacheDirs.forEach(dir => {
+        console.log(chalk.gray(`  - ${dir}`));
+      });
+      console.log();
+    }
+
   } catch (error) {
     spinner.fail(chalk.red('清理失败'));
     console.error(chalk.red(`错误: ${error.message}\n`));
@@ -281,11 +407,11 @@ async function cleanProjects(options = {}) {
 }
 
 /**
- * 管理项目会话
- * @param {string} projectName - 项目名称（可选）
+ * 管理单个项目的会话
+ * @param {string} projectName - 项目名称
  * @param {Object} options - 选项
  */
-async function manageSessionsCommand(projectName, options = {}) {
+async function manageSingleProjectSessions(projectName, options = {}) {
   const spinner = ora('正在加载会话列表...').start();
 
   try {
@@ -308,7 +434,7 @@ async function manageSessionsCommand(projectName, options = {}) {
       if (!targetName) {
         spinner.fail(chalk.red('未找到活跃项目'));
         console.log(chalk.yellow('\n请先使用 claude-pm switch <项目名> 设置活跃项目\n'));
-        console.log(chalk.gray('或使用 claude-pm sessions <项目名> 指定项目\n'));
+        console.log(chalk.gray('或使用 claude-pm session <项目名> 指定项目\n'));
         process.exit(1);
       }
 
@@ -558,11 +684,238 @@ async function historyClean() {
   }
 }
 
+/**
+ * 管理多个项目的会话（支持多选）
+ * @param {Object} options - 选项
+ */
+async function manageSessionsCommand(options = {}) {
+  const spinner = ora('正在读取项目列表...').start();
+
+  try {
+    const projects = getLocalProjects();
+    const projectsWithCache = projects.filter(p => p.hasCache && p.sessionCount > 0);
+
+    spinner.stop();
+
+    if (projectsWithCache.length === 0) {
+      console.log(chalk.yellow('\n⚠️  没有包含会话的项目\n'));
+      return;
+    }
+
+    // 准备选择项
+    const inquirer = require('inquirer');
+    const choices = projectsWithCache.map((project, index) => ({
+      name: `${chalk.cyan(project.name)} - ${chalk.gray(project.sessionCount + ' 个会话')} - ${chalk.gray(formatSize(project.size))}`,
+      value: project,
+      checked: false,
+    }));
+
+    // 交互式选择项目
+    const { selectedProjects } = await inquirer.prompt([
+      {
+        type: 'checkbox',
+        name: 'selectedProjects',
+        message: '选择要查看会话的项目（可多选）:',
+        choices: choices,
+        pageSize: 15,
+      }
+    ]);
+
+    if (selectedProjects.length === 0) {
+      console.log(chalk.yellow('\n❌ 未选择任何项目\n'));
+      return;
+    }
+
+    console.log(chalk.bold.cyan(`\n📊 已选择 ${selectedProjects.length} 个项目\n`));
+
+    // 收集所有选中项目的会话
+    const fs = require('fs');
+    const path = require('path');
+    const sizeThreshold = parseFloat(options.size) || 10; // 默认 10KB
+
+    const allSessions = [];
+    const projectSessionMap = new Map(); // 用于记录每个会话属于哪个项目
+
+    for (const project of selectedProjects) {
+      // 读取会话列表
+      const sessions = [];
+      const files = fs.readdirSync(project.path);
+      const jsonlFiles = files.filter(f => f.endsWith('.jsonl'));
+
+      for (const file of jsonlFiles) {
+        const filePath = path.join(project.path, file);
+        const stats = fs.statSync(filePath);
+        const sizeKB = stats.size / 1024;
+
+        const session = {
+          id: file.replace('.jsonl', ''),
+          fileName: file,
+          filePath: filePath,
+          size: stats.size,
+          sizeKB: sizeKB,
+          modified: stats.mtime,
+          projectName: project.name,
+          projectPath: project.realPath,
+        };
+
+        sessions.push(session);
+        projectSessionMap.set(filePath, project);
+      }
+
+      // 排序：按修改时间倒序
+      sessions.sort((a, b) => b.modified - a.modified);
+
+      allSessions.push(...sessions);
+    }
+
+    if (allSessions.length === 0) {
+      console.log(chalk.yellow('\n⚠️  所选项目没有会话记录\n'));
+      return;
+    }
+
+    // 按项目分组显示统计信息
+    console.log(chalk.bold.cyan('📋 会话统计:\n'));
+    for (const project of selectedProjects) {
+      const projectSessions = allSessions.filter(s => s.projectName === project.name);
+      const cleanableSessions = projectSessions.filter(s => s.sizeKB < sizeThreshold);
+      const totalSize = projectSessions.reduce((sum, s) => sum + s.size, 0);
+
+      console.log(chalk.green(`📁 ${project.name}`));
+      console.log(chalk.gray(`   总会话: ${projectSessions.length} 个 (${formatSize(totalSize)})`));
+
+      if (cleanableSessions.length > 0) {
+        const cleanableSize = cleanableSessions.reduce((sum, s) => sum + s.size, 0);
+        console.log(chalk.yellow(`   可清理: ${cleanableSessions.length} 个 (${formatSize(cleanableSize)}) [<${sizeThreshold}KB]`));
+      } else {
+        console.log(chalk.gray(`   可清理: 0 个 [<${sizeThreshold}KB]`));
+      }
+      console.log();
+    }
+
+    // 准备会话选择项（按项目分组显示）
+    const sessionChoices = [];
+    for (const project of selectedProjects) {
+      const projectSessions = allSessions.filter(s => s.projectName === project.name);
+
+      if (projectSessions.length > 0) {
+        // 添加项目分隔符
+        sessionChoices.push(new inquirer.Separator(chalk.bold.cyan(`\n━━━ ${project.name} ━━━`)));
+
+        // 添加该项目的所有会话
+        projectSessions.forEach((session) => {
+          const date = session.modified.toLocaleString('zh-CN');
+          const size = session.sizeKB < 1
+            ? `${session.size} B`
+            : `${session.sizeKB.toFixed(2)} KB`;
+          const isSmall = session.sizeKB < sizeThreshold;
+
+          sessionChoices.push({
+            name: `${chalk.gray(session.id.slice(0, 12))}... - ${size} - ${date}${isSmall ? chalk.yellow(' [小文件]') : ''}`,
+            value: session.filePath,
+            checked: isSmall, // 默认选中小于阈值的会话
+          });
+        });
+      }
+    }
+
+    // 交互式选择要删除的会话
+    const { selectedSessions } = await inquirer.prompt([
+      {
+        type: 'checkbox',
+        name: 'selectedSessions',
+        message: `选择要删除的会话 (默认已选中 <${sizeThreshold}KB 的会话):`,
+        choices: sessionChoices,
+        pageSize: 20,
+      }
+    ]);
+
+    if (selectedSessions.length === 0) {
+      console.log(chalk.yellow('\n❌ 未选择任何会话\n'));
+      return;
+    }
+
+    // 统计要删除的会话
+    const sessionsToDelete = allSessions.filter(s => selectedSessions.includes(s.filePath));
+    const totalSize = sessionsToDelete.reduce((sum, s) => sum + s.size, 0);
+
+    // 按项目分组统计
+    const deleteByProject = new Map();
+    for (const session of sessionsToDelete) {
+      if (!deleteByProject.has(session.projectName)) {
+        deleteByProject.set(session.projectName, []);
+      }
+      deleteByProject.get(session.projectName).push(session);
+    }
+
+    console.log(chalk.bold.yellow(`\n📊 删除预览:\n`));
+    for (const [projectName, sessions] of deleteByProject.entries()) {
+      const projectSize = sessions.reduce((sum, s) => sum + s.size, 0);
+      console.log(chalk.cyan(`📁 ${projectName}: ${sessions.length} 个会话 (${formatSize(projectSize)})`));
+    }
+    console.log(chalk.bold(`\n总计: ${sessionsToDelete.length} 个会话 (${formatSize(totalSize)})\n`));
+
+    // 确认删除
+    const { confirm } = await inquirer.prompt([
+      {
+        type: 'confirm',
+        name: 'confirm',
+        message: `确认删除这 ${sessionsToDelete.length} 个会话吗？`,
+        default: false,
+      }
+    ]);
+
+    if (!confirm) {
+      console.log(chalk.yellow('\n❌ 已取消删除\n'));
+      return;
+    }
+
+    // 执行删除
+    let deletedCount = 0;
+    const deleteErrors = [];
+
+    for (const filePath of selectedSessions) {
+      try {
+        fs.unlinkSync(filePath);
+        deletedCount++;
+      } catch (error) {
+        deleteErrors.push({
+          file: path.basename(filePath),
+          error: error.message
+        });
+      }
+    }
+
+    console.log(chalk.green(`\n✅ 已删除 ${deletedCount} 个会话`));
+
+    if (deleteErrors.length > 0) {
+      console.log(chalk.red(`\n⚠️  ${deleteErrors.length} 个会话删除失败:`));
+      deleteErrors.forEach(({ file, error }) => {
+        console.log(chalk.gray(`  - ${file}: ${error}`));
+      });
+    }
+
+    // 按项目显示删除结果
+    console.log(chalk.bold.cyan('\n📊 删除结果:\n'));
+    for (const [projectName, sessions] of deleteByProject.entries()) {
+      const deletedInProject = sessions.filter(s => !deleteErrors.some(e => e.file === s.fileName)).length;
+      const projectSize = sessions.filter(s => !deleteErrors.some(e => e.file === s.fileName)).reduce((sum, s) => sum + s.size, 0);
+      console.log(chalk.green(`📁 ${projectName}: 已删除 ${deletedInProject} 个会话 (${formatSize(projectSize)})`));
+    }
+    console.log();
+
+  } catch (error) {
+    spinner.fail(chalk.red('操作失败'));
+    console.error(chalk.red(`错误: ${error.message}\n`));
+    process.exit(1);
+  }
+}
+
 module.exports = {
   listProjects,
   switchProject,
   showCurrentProject,
   cleanProjects,
   manageSessionsCommand,
+  manageSingleProjectSessions,
   historyClean,
 };
